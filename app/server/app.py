@@ -30,6 +30,29 @@ app = Flask(__name__, static_folder=os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ui"),
     static_url_path="")
 
+
+class _PrefixMiddleware:
+    """fnOS 统一网关转发保留 /app/mihome-admin 前缀 → 剥掉再进路由。
+
+    TCP 直连（不带前缀）的请求原样通过，互不影响。
+    """
+
+    def __init__(self, wsgi, prefix):
+        self.wsgi = wsgi
+        self.prefix = prefix.rstrip("/")
+
+    def __call__(self, environ, start_response):
+        path = environ.get("PATH_INFO", "")
+        if path == self.prefix:
+            environ["PATH_INFO"] = "/"
+        elif path.startswith(self.prefix + "/"):
+            environ["PATH_INFO"] = path[len(self.prefix):]
+        return self.wsgi(environ, start_response)
+
+
+app.wsgi_app = _PrefixMiddleware(
+    app.wsgi_app, os.environ.get("MIA_URL_PREFIX", "/app/mihome-admin"))
+
 store = Store()
 
 cloud_lock = threading.Lock()
