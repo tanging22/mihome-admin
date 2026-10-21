@@ -265,6 +265,115 @@ async function toggleInfoCard(a, el) {
 }
 setInterval(() => refreshInfoCards(), 30000);
 
+
+/* ---------------- 添加控件向导（简化版） ---------------- */
+async function openAddWizard(sectionId) {
+  if (!state.status?.logged_in) { toast("请先登录小米账号", "bad"); return openLoginModal(); }
+  if (!state.devices.length) {
+    const r = await api("GET", "/api/devices?refresh=1");
+    if (r.ok) state.devices = r.data.devices || [];
+  }
+  if (!state.devices.length) return toast("没有可用设备，请先在「设备」里刷新", "bad", 4000);
+  const devOpts = [...state.devices]
+    .sort((a, b) => (b.isOnline - a.isOnline))
+    .map((d) => `<option value="${esc(String(d.did))}">${d.isOnline ? "🟢" : "⚪"} ${esc(d.name)}（${esc(d.model || "")}）</option>`)
+    .join("");
+  openModal(`
+    <h3>添加控件</h3>
+    <p class="m-sub">选设备 → 勾选要显示的信息或要执行的按钮 → 添加。</p>
+    <div class="form-row">
+      <label>选择设备</label>
+      <select id="wz-dev">${devOpts}</select>
+    </div>
+    <div id="wz-body" class="wiz-body"><p class="hint" style="text-align:center">正在读取设备能力…</p></div>
+    <div class="modal-actions">
+      <button class="ghost-btn" id="wz-adv">高级模式（手动填写）</button>
+      <button class="primary-btn" id="wz-go" disabled>添加</button>
+    </div>`);
+  $("#wz-adv").onclick = () => { closeModal(); openActionEditor(null, sectionId); };
+  const loadSpec = async () => {
+    const did = $("#wz-dev").value;
+    const dev = state.devices.find((d) => String(d.did) === String(did));
+    const body = $("#wz-body");
+    body.innerHTML = `<p class="hint" style="text-align:center">正在读取设备能力…</p>`;
+    $("#wz-go").disabled = true;
+    const sp = await api("GET", `/api/devices/${encodeURIComponent(dev.model)}/spec`);
+    if (!sp.ok || !sp.data) {
+      body.innerHTML = `<p class="hint" style="text-align:center">该设备没有公开的功能描述（spec），可用「高级模式」手动添加。</p>`;
+      return;
+    }
+    const services = sp.data.services || [];
+    const props = [], acts = [];
+    for (const sv of services) {
+      for (const pr of sv.properties || []) {
+        const acc = pr.access || [];
+        if (!acc.includes("read")) continue;
+        const writable = acc.includes("write");
+        const isBool = pr.format === "bool";
+        props.push({ siid: sv.iid, piid: pr.iid, desc: pr.description || ("属性" + pr.iid),
+                     unit: pr.unit || "", writable, isBool });
+      }
+      for (const ac of sv.actions || []) {
+        if ((ac.in || []).length) continue;      // 带参数的动作走高级模式
+        acts.push({ siid: sv.iid, aiid: ac.iid, desc: ac.description || ("动作" + ac.iid) });
+      }
+    }
+    if (!props.length && !acts.length) {
+      body.innerHTML = `<p class="hint" style="text-align:center">该设备没有可显示的信息或可执行的动作。</p>`;
+      return;
+    }
+    const propRows = props.map((p, i) => `
+      <label class="wiz-item">
+        <input type="checkbox" class="wz-prop" data-i="${i}" ${p.isBool && p.writable ? "" : "checked"}>
+        <span class="wiz-name">${esc(p.desc)}</span>
+        <span class="wiz-tag">${p.writable && p.isBool ? "开关" : "信息"}${p.unit ? " · " + esc(p.unit) : ""}</span>
+      </label>`).join("");
+    const actRows = acts.map((a, i) => `
+      <label class="wiz-item">
+        <input type="checkbox" class="wz-act" data-i="${i}" checked>
+        <span class="wiz-name">${esc(a.desc)}</span>
+        <span class="wiz-tag">按钮</span>
+      </label>`).join("");
+    body.innerHTML = `
+      ${props.length ? `<div class="wiz-h">显示信息（勾选后主页会显示实时数值 / 开关）</div>${propRows}` : ""}
+      ${acts.length ? `<div class="wiz-h">一键按钮</div>${actRows}` : ""}`;
+    $("#wz-go").disabled = false;
+    $("#wz-go").textContent = `添加（勾选后点击）`;
+    $("#wz-go").onclick = async () => {
+      const go = $("#wz-go"); go.disabled = true;
+      const picks = [];
+      body.querySelectorAll(".wz-prop:checked").forEach((cb) => {
+        const p = props[+cb.dataset.i];
+        picks.push({
+          name: p.desc, action_type: "prop_display",
+          device_did: dev.did, device_name: dev.name, device_model: dev.model,
+          params: { siid: p.siid, piid: p.piid, unit: p.unit,
+                    toggle: (p.writable && p.isBool) ? "1" : "" } });
+      });
+      body.querySelectorAll(".wz-act:checked").forEach((cb) => {
+        const a = acts[+cb.dataset.i];
+        picks.push({
+          name: a.desc, action_type: "miot_action",
+          device_did: dev.did, device_name: dev.name, device_model: dev.model,
+          params: { siid: a.siid, aiid: a.aiid, in: [] } });
+      });
+      if (!picks.length) { go.disabled = false; return toast("请先勾选至少一项", "bad"); }
+      let n = 0;
+      for (const pk of picks) {
+        const r = await api("POST", "/api/actions", { ...pk, section_id: sectionId });
+        if (r.ok) n++;
+      }
+      go.disabled = false;
+      toast(`✓ 已添加 ${n} 个控件`, "good", 2800);
+      closeModal();
+      await loadAll(true);
+      refreshInfoCards();
+    };
+  };
+  $("#wz-dev").onchange = loadSpec;
+  loadSpec();
+}
+
 /* ---------------- 动作执行 ---------------- */
 function triggerAction(a, el) {
   if (a.require_password) return openPasswordModal(a, el);

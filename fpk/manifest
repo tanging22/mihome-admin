@@ -1,5 +1,5 @@
 appname               = mihome-admin
-version               = 1.0.8
+version               = 1.1.0
 display_name          = 米家设备管家
 desc                  = 小米生态 Web 设备管理面板：登录小米账号（支持米家 App 登录确认 2FA）获取在线设备，按栏目自由布置一键动作卡片；支持云端 MIoT 属性/动作、旧版 RPC 与局域网 miIO 直连四种执行方式，动作可开启二次确认与小米安全密码校验。
 platform              = all
