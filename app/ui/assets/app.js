@@ -302,20 +302,30 @@ async function openAddWizard(sectionId) {
       body.innerHTML = `<p class="hint" style="text-align:center">该设备没有公开的功能描述（spec），可用「高级模式」手动添加。</p>`;
       return;
     }
-    const services = sp.data.services || [];
+    const specObj = sp.data.spec || sp.data;
+    const services = specObj.services || [];
     const props = [], acts = [];
+    const CN = {switch:"开关", on:"开关", power:"功率", "power-consumption":"功率",
+      "electric-power":"功率", "electric-current":"电流", voltage:"电压",
+      "indicator-light":"指示灯", "battery-level":"电量", battery:"电量",
+      temperature:"温度", "relative-humidity":"湿度", humidity:"湿度",
+      illumination:"光照度", brightness:"亮度", color:"色彩", mode:"模式",
+      "fan-level":"风量", status:"状态", fault:"故障", "motor-control":"电机",
+      "target-temperature":"目标温度", "target-humidity":"目标湿度",
+      "alarm-switch":"告警开关", "physical-controls-locked":"童锁"};
+    const label = (desc) => (desc && CN[desc.toLowerCase()]) || desc;
     for (const sv of services) {
       for (const pr of sv.properties || []) {
         const acc = pr.access || [];
         if (!acc.includes("read")) continue;
         const writable = acc.includes("write");
         const isBool = pr.format === "bool";
-        props.push({ siid: sv.iid, piid: pr.iid, desc: pr.description || ("属性" + pr.iid),
+        props.push({ siid: sv.iid, piid: pr.iid, desc: label(pr.description) || ("属性" + pr.iid),
                      unit: pr.unit || "", writable, isBool });
       }
       for (const ac of sv.actions || []) {
         if ((ac.in || []).length) continue;      // 带参数的动作走高级模式
-        acts.push({ siid: sv.iid, aiid: ac.iid, desc: ac.description || ("动作" + ac.iid) });
+        acts.push({ siid: sv.iid, aiid: ac.iid, desc: label(ac.description) || ("动作" + ac.iid) });
       }
     }
     if (!props.length && !acts.length) {
