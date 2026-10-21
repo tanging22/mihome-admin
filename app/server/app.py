@@ -21,6 +21,7 @@ from xiaomi.cloud import (                   # noqa: E402
     MiCloudClient, LoginConfirmNeeded, LoginSmsNeeded)
 from xiaomi.micloudexception import MiCloudException        # noqa: E402
 from xiaomi import miio                     # noqa: E402
+from xiaomi import oauth                    # noqa: E402
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -67,6 +68,40 @@ cloud = MiCloudClient()
 
 # SMS 登录中间态（username/password/country/remember 待验证通过后落库）
 _pending_auth = {}
+
+# OAuth 官方登录态：_oauth 为 xiaomi.oauth.HaClient 或 None
+_oauth = None
+_pending_oauth = {}     # state -> {"redirect": uri, "ts": epoch}
+_oauth_done = set()     # 已完成验证的 state
+
+
+def _oauth_ready():
+    """恢复持久化 OAuth 登录态；有效返回 True。"""
+    global _oauth
+    if _oauth is not None:
+        return True
+    st = store.load_cloud_state() or {}
+    if st.get("auth_type") == "oauth" and st.get("access_token"):
+        _oauth = oauth.HaClient(st["access_token"], st.get("device_id"),
+                                st.get("country") or "cn")
+        return True
+    return False
+
+
+def _cloud_call(method, *args, **kwargs):
+    """云端调用 dispatch：OAuth 官方登录优先，serviceToken 兜底。
+
+    method 形如 "get_devices" / "miot_prop_set"，在两个客户端上同形。
+    """
+    global _oauth
+    if _oauth_ready():
+        try:
+            return getattr(_oauth, method)(*args, **kwargs)
+        except oauth.OAuthTokenExpired:
+            _oauth = None          # token 失效，落回 serviceToken 流程
+    if not _ensure_login():
+        raise RuntimeError("云端登录态失效，请重新登录")
+    return getattr(cloud, method)(*args, **kwargs)
 
 # ---------------------------------------------------------------- TCP 监听管理
 _tcp_server = None
@@ -187,8 +222,10 @@ def index():
 @app.get("/api/status")
 def status():
     devices, ts = store.load_devices()
+    auth_type = "oauth" if _oauth_ready() else ("password" if _ensure_login() else "")
     return ok({
-        "logged_in": _ensure_login(),
+        "logged_in": bool(auth_type),
+        "auth_type": auth_type,
         "username": store.get_xiaomi_username(),
         "country": cloud.country,
         "devices_cached": len(devices),
@@ -302,9 +339,147 @@ def auth_confirm():
     return ok({"devices": len(devices)})
 
 
+# ---------------------------------------------------------------- OAuth 官方登录
+_OAUTH_STATE_TTL = 600  # start → 完成登录的有效期（秒）
+
+
+def _oauth_page(title, msg):
+    return make_response(
+        "<!doctype html><meta charset='utf-8'>"
+        "<title>%s</title><body style='font-family:sans-serif;"
+        "display:flex;align-items:center;justify-content:center;height:95vh'>"
+        "<div style='text-align:center'><h2>%s</h2><p style='color:#666'>%s</p>"
+        "<p style='color:#999;font-size:13px'>请回到米家设备管家页面查看结果，本页可以关闭。</p>"
+        "</div></body>" % (title, title, msg), 200)
+
+
+@app.post("/api/auth/oauth/start")
+def oauth_start():
+    """生成小米官方登录跳转 URL。
+
+    redirect_uri 固定用白名单内的 homeassistant.local:8123：官方页登录后
+    浏览器跳到该地址（打不开），用户把地址栏 URL 粘贴回 /exchange 换 token。
+    """
+    import secrets
+    import time as _t
+    # 过期清理
+    now = _t.time()
+    for k in [k for k, v in _pending_oauth.items() if now - v.get("ts", 0) > _OAUTH_STATE_TTL]:
+        _pending_oauth.pop(k, None)
+    state = secrets.token_hex(16)
+    _pending_oauth[state] = {"redirect": oauth.HA_REDIRECT_URL, "ts": now}
+    return ok({"url": oauth.login_url(oauth.HA_REDIRECT_URL, state), "state": state})
+
+
+@app.post("/api/auth/oauth/exchange")
+def oauth_exchange():
+    """用户粘贴官方页登录后的回调地址（含 code），换 token 并验证。"""
+    import time as _t
+    from urllib.parse import urlparse, parse_qs
+    body = request.get_json(silent=True) or {}
+    raw = (body.get("callback_url") or "").strip()
+    if not raw:
+        return err("请粘贴登录后浏览器地址栏的完整网址")
+    if not raw.startswith(("http://", "https://")):
+        raw = "http://" + raw
+    q = parse_qs(urlparse(raw).query)
+    code = (q.get("code") or [""])[0]
+    state = (q.get("state") or [""])[0]
+    if not code:
+        return err("粘贴的网址里没有 code，请确认复制的是登录完成后的地址栏网址")
+    info = _pending_oauth.get(state)
+    if not info:
+        return err("登录会话已过期（state 不匹配），请重新点击官方登录")
+    try:
+        token = oauth.token_by_code(code, oauth.HA_REDIRECT_URL)
+    except Exception as e:
+        log.warning("OAuth 换 token 失败: %s", e)
+        return err("获取 token 失败：%s" % e)
+    store.save_cloud_state({
+        "auth_type": "oauth",
+        "access_token": token.get("access_token"),
+        "refresh_token": token.get("refresh_token"),
+        "device_id": token.get("device_id"),
+        "expires_at": int(_t.time()) + int(float(token.get("expires_in") or 0) * 0.9),
+        "saved_at": int(_t.time()),
+    })
+    global _oauth
+    _oauth = oauth.HaClient(token["access_token"], token.get("device_id"))
+    # 拿用户昵称（失败不阻断）
+    nickname = ""
+    try:
+        nickname = (_oauth.user_profile().get("miliaoNick") or "")
+    except Exception as e:
+        log.info("获取用户昵称失败: %s", e)
+    try:
+        devices = _cloud_call("get_devices")
+        store.save_devices(devices)
+        if nickname:
+            store.kv_set("xiaomi.username", nickname)
+    except Exception as e:
+        log.warning("OAuth token 已保存，但验证拉取设备失败: %s", e)
+        return err("token 已保存，但设备验证失败：%s" % e)
+    _oauth_done.add(state)
+    _pending_oauth.pop(state, None)
+    return ok({"username": nickname, "devices": len(devices)})
+
+
+@app.get("/api/auth/oauth/callback")
+def oauth_callback():
+    """小米官方登录回调：code 换 token，验证并保存。"""
+    import time as _t
+    code = request.args.get("code", "")
+    state = request.args.get("state", "")
+    info = _pending_oauth.get(state)
+    if not info:
+        return _oauth_page("会话已过期", "登录会话不存在或已超时，请在面板重新发起官方登录。")
+    try:
+        token = oauth.token_by_code(code, info["redirect"])
+    except Exception as e:
+        _pending_oauth.pop(state, None)
+        log.warning("OAuth 换 token 失败: %s", e)
+        return _oauth_page("登录失败", "获取 token 失败：%s" % e)
+    store.save_cloud_state({
+        "auth_type": "oauth",
+        "access_token": token.get("access_token"),
+        "refresh_token": token.get("refresh_token"),
+        "device_id": token.get("device_id"),
+        "expires_at": int(_t.time()) + int(float(token.get("expires_in") or 0) * 0.9),
+        "saved_at": int(_t.time()),
+    })
+    global _oauth
+    _oauth = oauth.HaClient(token["access_token"], token.get("device_id"))
+    # 拿用户昵称（失败不阻断）
+    nickname = ""
+    try:
+        nickname = (_oauth.user_profile().get("miliaoNick") or "")
+    except Exception as e:
+        log.info("获取用户昵称失败: %s", e)
+    try:
+        devices = _cloud_call("get_devices")
+        store.save_devices(devices)
+        if nickname:
+            store.kv_set("xiaomi.username", nickname)
+    except Exception as e:
+        log.warning("OAuth token 已保存，但验证拉取设备失败: %s", e)
+        return _oauth_page("登录部分成功",
+                           "token 已保存，但设备验证失败：%s。请到面板刷新设备试试。" % e)
+    _oauth_done.add(state)
+    _pending_oauth.pop(state, None)
+    return _oauth_page("登录成功", "已获取小米官方授权并验证通过。")
+
+
+@app.get("/api/auth/oauth/status")
+def oauth_status():
+    state = request.args.get("state", "")
+    return ok({"done": state in _oauth_done})
+
+
 @app.post("/api/auth/logout")
 def auth_logout():
+    global _oauth
     store.clear_xiaomi()
+    _oauth = None
     return ok()
 
 
@@ -389,13 +564,12 @@ def panel_listen():
 
 # ---------------------------------------------------------------- 设备
 def _refresh_devices_internal():
-    with cloud_lock:
-        try:
-            devices = cloud.get_devices()
-        except Exception as e:
-            log.warning("拉取设备列表失败: %s", e)
-            devices, _ = store.load_devices()
-            return devices
+    try:
+        devices = _cloud_call("get_devices")
+    except Exception as e:
+        log.warning("拉取设备列表失败: %s", e)
+        devices, _ = store.load_devices()
+        return devices
     store.save_devices(devices)
     return devices
 
@@ -512,17 +686,13 @@ def _run_action(action, password=None):
     params = action.get("params") or {}
     did = action.get("device_did")
     if atype == "miot_prop_set":
-        if not _ensure_login():
-            raise RuntimeError("云端登录态失效，请重新登录")
-        r = cloud.miot_prop_set(did, params["siid"], params["piid"], params["value"])
+        r = _cloud_call("miot_prop_set", did, params["siid"], params["piid"],
+                        params["value"])
     elif atype == "miot_action":
-        if not _ensure_login():
-            raise RuntimeError("云端登录态失效，请重新登录")
-        r = cloud.miot_action(did, params["siid"], params["aiid"], params.get("in"))
+        r = _cloud_call("miot_action", did, params["siid"], params["aiid"],
+                        params.get("in"))
     elif atype == "rpc":
-        if not _ensure_login():
-            raise RuntimeError("云端登录态失效，请重新登录")
-        r = cloud.rpc(did, params["method"], params.get("params"))
+        r = _cloud_call("rpc", did, params["method"], params.get("params"))
     elif atype == "miio_lan":
         with socket_ctx() as s:
             r = miio.send(s, params["ip"], params["token"], params["method"],
@@ -557,7 +727,8 @@ def actions_run(aid):
     try:
         r = _run_action(action, body.get("password"))
         return jsonify({"ok": True, "result": r})
-    except (MiCloudException, RuntimeError, miio.MiIOError, OSError) as e:
+    except (MiCloudException, RuntimeError, miio.MiIOError, OSError,
+            oauth.OAuthError) as e:
         return jsonify({"ok": False, "error": str(e)}), 502
 
 
@@ -582,11 +753,9 @@ def miio_send():
 
 @app.post("/api/cloud/rpc")
 def cloud_rpc():
-    if not _ensure_login():
-        return err("未登录", 401)
     body = request.get_json(silent=True) or {}
     try:
-        r = cloud.rpc(body.get("did"), body["method"], body.get("params"))
+        r = _cloud_call("rpc", body.get("did"), body.get("method"), body.get("params"))
         return jsonify({"ok": True, "result": r})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 502

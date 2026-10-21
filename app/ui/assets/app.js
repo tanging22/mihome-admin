@@ -225,6 +225,21 @@ function openLoginModal(prefill = {}) {
   openModal(`
     <h3>登录小米账号</h3>
     <p class="m-sub">账号仅保存在本机 NAS 数据库，用于获取设备列表与执行动作。</p>
+    <button class="primary-btn" id="lg-oauth" style="width:100%">使用小米官方登录（推荐）</button>
+    <p class="hint" style="text-align:center;margin:6px 0 0">跳转小米官方页面完成验证码 / 短信等安全验证，登录后把地址栏网址粘贴回来。</p>
+    <div id="lg-oauth-box" class="notice hidden">
+      <b>① 在官方页面完成登录</b>（验证码 / 短信等都在官方页操作）。<br>
+      登录后浏览器会跳到一个<b>打不开的页面</b>，这是正常的。<br>
+      <b>② 复制浏览器地址栏里的完整网址</b>，粘贴到下面：
+      <div class="form-row" style="margin-top:8px">
+        <input type="text" id="lg-paste-url" placeholder="http://homeassistant.local:8123/?code=...&state=...">
+      </div>
+      <div class="modal-actions" style="margin-bottom:0">
+        <button class="primary-btn" id="lg-paste-go">完成登录</button>
+      </div>
+    </div>
+    <div class="set-h" id="lg-pw-toggle" style="cursor:pointer">▸ 使用账号密码登录</div>
+    <div id="lg-pw-area" class="hidden">
     <div class="form-row">
       <label>小米账号（手机号 / 邮箱）</label>
       <input type="text" id="lg-user" value="${esc(prefill.username || "")}" autocomplete="off">
@@ -270,12 +285,47 @@ function openLoginModal(prefill = {}) {
         <button class="primary-btn" id="lg-sms-go">验证并登录</button>
       </div>
     </div>
+    </div>
     <div class="modal-actions">
       <button class="ghost-btn" id="lg-cancel">取消</button>
       <button class="primary-btn" id="lg-go">登录</button>
     </div>`);
   $("#lg-country").value = prefill.country || "cn";
   $("#lg-cancel").onclick = closeModal;
+  // 密码登录区折叠/展开
+  $("#lg-pw-toggle").onclick = () => {
+    const area = $("#lg-pw-area");
+    const open = area.classList.toggle("hidden") === false;
+    $("#lg-pw-toggle").textContent = open ? "▾ 使用账号密码登录" : "▸ 使用账号密码登录";
+  };
+  // 官方 OAuth 登录
+  $("#lg-oauth").onclick = async () => {
+    const btn = $("#lg-oauth");
+    btn.disabled = true; btn.textContent = "正在跳转小米官方页面…";
+    const r = await api("POST", "/api/auth/oauth/start", {});
+    if (!r.ok) {
+      btn.disabled = false; btn.textContent = "使用小米官方登录（推荐）";
+      return toast(r.error || "发起官方登录失败", "bad", 4000);
+    }
+    window.open(r.data.url, "_blank");
+    // 显示粘贴回调地址区
+    $("#lg-oauth-box").classList.remove("hidden");
+    btn.textContent = "官方页面已打开";
+    $("#lg-paste-go").onclick = async () => {
+      const url = $("#lg-paste-url").value.trim();
+      if (!url) return toast("请粘贴登录后浏览器地址栏的完整网址", "bad");
+      const go = $("#lg-paste-go"); go.disabled = true; go.textContent = "验证中…";
+      const er = await api("POST", "/api/auth/oauth/exchange", { callback_url: url });
+      go.disabled = false; go.textContent = "完成登录";
+      if (er.ok) {
+        toast(`✓ 小米官方登录成功${er.data.username ? "（" + er.data.username + "）" : ""}`, "good", 3600);
+        closeModal();
+        await loadAll(true);
+      } else {
+        toast(er.error || "验证失败", "bad", 5000);
+      }
+    };
+  };
   $("#lg-pass").focus();
   const doLogin = async () => {
     const username = $("#lg-user").value.trim();
