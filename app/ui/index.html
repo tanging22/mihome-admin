@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!--
+  资源一律相对路径：fnOS 统一网关以 /app/mihome-admin/ 前缀代理本服务，
+  绝对路径会逃出前缀导致 404。API 调用同理（见 app.js）。
+-->
+<meta name="robots" content="noindex, nofollow">
+<title>米家设备管家</title>
+<link rel="icon" href="assets/icon.png" type="image/png">
+<link rel="stylesheet" href="assets/app.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <img src="assets/icon.png" alt="" width="30" height="30">
+    <div>
+      <strong>米家设备管家</strong>
+      <span class="sub" id="status-line">未登录</span>
+    </div>
+  </div>
+  <div class="top-actions">
+    <button id="btn-edit" class="ghost-btn" title="进入/退出编辑模式">编辑</button>
+    <button id="btn-devices" class="ghost-btn" title="设备与调试">设备</button>
+    <button id="btn-login" class="primary-btn">登录小米账号</button>
+    <button id="btn-logout" class="ghost-btn hidden">退出</button>
+  </div>
+</header>
+
+<main id="board" class="board"></main>
+
+<div id="empty-hint" class="empty hidden">
+  <div class="empty-icon">🏠</div>
+  <p>还没有栏目。点右上角「编辑」，然后「＋ 添加栏目」开始布置你的主页。</p>
+  <p class="empty-sub">登录小米账号后即可把在线设备做成一键动作卡片。</p>
+</div>
+
+<!-- 通用模态 -->
+<div id="modal-mask" class="modal-mask hidden">
+  <div class="modal" id="modal-box"></div>
+</div>
+
+<div id="toast-wrap" class="toast-wrap"></div>
+<script src="assets/app.js"></script>
+</body>
+</html>

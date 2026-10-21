@@ -1,0 +1,104 @@
+#!/bin/bash
+# 米家设备管家 —— 启停脚本（fnOS 套件框架调用）
+set -u
+
+PKG_VAR_DIR="${TRIM_PKGVAR:-/var/apps/mihome-admin/var}"
+APP_HOME="${TRIM_APPDEST:-/var/apps/mihome-admin/target}"
+LOG_FILE="${PKG_VAR_DIR}/info.log"
+PID_FILE="${PKG_VAR_DIR}/app.pid"
+
+PYTHON_BIN="${MIA_PYTHON:-/usr/bin/python3}"
+ENTRY="${APP_HOME}/server/app.py"
+VENDOR="${APP_HOME}/server/vendor"
+
+# 端口：安装向导注入的 wizard_web_port > MIA_PORT > 默认 28100
+PORT="${wizard_web_port:-${MIA_PORT:-28100}}"
+case "${PORT}" in
+  ''|*[!0-9]*|0|[1-9]) PORT=28100 ;;  # 非法值兜底（1-9 开头的单位数也拒绝）
+esac
+
+log_msg() { echo "$(date '+%Y-%m-%d %H:%M:%S') [mihome] $*" >> "${LOG_FILE}" 2>/dev/null || true; }
+
+is_running() {
+  [ -f "${PID_FILE}" ] || return 1
+  local pid; pid="$(cat "${PID_FILE}" 2>/dev/null)"
+  [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null
+}
+
+wait_port() {
+  local port="$1" tries="${2:-30}"
+  for _ in $(seq 1 "${tries}"); do
+    if command -v curl >/dev/null 2>&1; then
+      curl -s -o /dev/null --max-time 1 "http://127.0.0.1:${port}/api/status" && return 0
+    else
+      (exec 3<>"/dev/tcp/127.0.0.1/${port}") 2>/dev/null && { exec 3>&-; return 0; }
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+do_start() {
+  mkdir -p "${PKG_VAR_DIR}" 2>/dev/null || true
+  if is_running; then
+    log_msg "already running (pid $(cat "${PID_FILE}"))"
+    exit 0
+  fi
+  log_msg "starting on port ${PORT} ..."
+  # 清理陈旧 PID
+  rm -f "${PID_FILE}"
+  PYTHONPATH="${VENDOR}" \
+  MIA_PORT="${PORT}" \
+  MIA_DATA_DIR="${PKG_VAR_DIR}" \
+  nohup "${PYTHON_BIN}" "${ENTRY}" >> "${LOG_FILE}" 2>&1 &
+  local pid=$!
+  echo "${pid}" > "${PID_FILE}"
+  if wait_port "${PORT}" 30; then
+    log_msg "started pid=${pid} port=${PORT}"
+    exit 0
+  fi
+  if kill -0 "${pid}" 2>/dev/null; then
+    log_msg "process alive but port ${PORT} not ready yet; keeping pid=${pid}"
+    exit 0
+  fi
+  log_msg "failed to start, tail of log:"
+  tail -n 20 "${LOG_FILE}" >> "${TRIM_TEMP_LOGFILE:-/dev/null}" 2>/dev/null || true
+  rm -f "${PID_FILE}"
+  exit 1
+}
+
+do_stop() {
+  if ! is_running; then
+    rm -f "${PID_FILE}"
+    log_msg "not running"
+    exit 0
+  fi
+  local pid; pid="$(cat "${PID_FILE}")"
+  log_msg "stopping pid=${pid}"
+  kill "${pid}" 2>/dev/null
+  for _ in $(seq 1 15); do
+    kill -0 "${pid}" 2>/dev/null || break
+    sleep 1
+  done
+  if kill -0 "${pid}" 2>/dev/null; then
+    kill -9 "${pid}" 2>/dev/null
+    log_msg "force killed pid=${pid}"
+  fi
+  rm -f "${PID_FILE}"
+  exit 0
+}
+
+do_status() {
+  if is_running; then
+    exit 0   # 约定：0 = 运行中
+  fi
+  exit 3     # 约定：3 = 未运行
+}
+
+case "${1:-}" in
+  start)   do_start ;;
+  stop)    do_stop ;;
+  status)  do_status ;;
+  restart) do_stop; sleep 1; do_start ;;
+  *) echo "usage: $0 {start|stop|status|restart}"; exit 1 ;;
+esac

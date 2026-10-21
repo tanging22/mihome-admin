@@ -1,0 +1,7 @@
+build/
+dist/
+app/server/vendor/
+data/
+__pycache__/
+*.pyc
+.tmp/
