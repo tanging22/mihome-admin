@@ -367,8 +367,12 @@ def oauth_start():
     for k in [k for k, v in _pending_oauth.items() if now - v.get("ts", 0) > _OAUTH_STATE_TTL]:
         _pending_oauth.pop(k, None)
     state = secrets.token_hex(16)
-    _pending_oauth[state] = {"redirect": oauth.HA_REDIRECT_URL, "ts": now}
-    return ok({"url": oauth.login_url(oauth.HA_REDIRECT_URL, state), "state": state})
+    # 授权页与换 token 必须用同一个 device_id，否则小米报 invalid authorization code
+    device_id = oauth.new_device_id()
+    _pending_oauth[state] = {"redirect": oauth.HA_REDIRECT_URL, "ts": now,
+                             "device_id": device_id}
+    return ok({"url": oauth.login_url(oauth.HA_REDIRECT_URL, state,
+                                      device_id=device_id), "state": state})
 
 
 @app.post("/api/auth/oauth/exchange")
@@ -391,7 +395,8 @@ def oauth_exchange():
     if not info:
         return err("登录会话已过期（state 不匹配），请重新点击官方登录")
     try:
-        token = oauth.token_by_code(code, oauth.HA_REDIRECT_URL)
+        token = oauth.token_by_code(code, oauth.HA_REDIRECT_URL,
+                                    device_id=info.get("device_id"))
     except Exception as e:
         log.warning("OAuth 换 token 失败: %s", e)
         return err("获取 token 失败：%s" % e)
@@ -399,12 +404,12 @@ def oauth_exchange():
         "auth_type": "oauth",
         "access_token": token.get("access_token"),
         "refresh_token": token.get("refresh_token"),
-        "device_id": token.get("device_id"),
+        "device_id": info.get("device_id"),
         "expires_at": int(_t.time()) + int(float(token.get("expires_in") or 0) * 0.9),
         "saved_at": int(_t.time()),
     })
     global _oauth
-    _oauth = oauth.HaClient(token["access_token"], token.get("device_id"))
+    _oauth = oauth.HaClient(token["access_token"], info.get("device_id"))
     # 拿用户昵称（失败不阻断）
     nickname = ""
     try:
@@ -434,7 +439,8 @@ def oauth_callback():
     if not info:
         return _oauth_page("会话已过期", "登录会话不存在或已超时，请在面板重新发起官方登录。")
     try:
-        token = oauth.token_by_code(code, info["redirect"])
+        token = oauth.token_by_code(code, info["redirect"],
+                                    device_id=info.get("device_id"))
     except Exception as e:
         _pending_oauth.pop(state, None)
         log.warning("OAuth 换 token 失败: %s", e)
@@ -443,12 +449,12 @@ def oauth_callback():
         "auth_type": "oauth",
         "access_token": token.get("access_token"),
         "refresh_token": token.get("refresh_token"),
-        "device_id": token.get("device_id"),
+        "device_id": info.get("device_id"),
         "expires_at": int(_t.time()) + int(float(token.get("expires_in") or 0) * 0.9),
         "saved_at": int(_t.time()),
     })
     global _oauth
-    _oauth = oauth.HaClient(token["access_token"], token.get("device_id"))
+    _oauth = oauth.HaClient(token["access_token"], info.get("device_id"))
     # 拿用户昵称（失败不阻断）
     nickname = ""
     try:
