@@ -23,6 +23,10 @@ async function api(method, path, body) {
   const r = await fetch(path, opt);
   let d = {};
   try { d = await r.json(); } catch (e) { d = { ok: false, error: "HTTP " + r.status }; }
+  // TCP 直连遇到面板密码拦截 → 弹面板登录框（登录成功自动刷新）
+  if (r.status === 401 && d.need_panel_login && !path.startsWith("/api/panel/")) {
+    openPanelLoginModal();
+  }
   return d;
 }
 
@@ -245,6 +249,19 @@ function openLoginModal(prefill = {}) {
     <div id="lg-confirm-box" class="notice hidden">
       小米要求登录确认。请打开米家 App，在「我的 → 消息」或弹窗里点「确认登录」，然后回来点下面的按钮。
     </div>
+    <div id="lg-sms-box" class="notice hidden">
+      小米要求短信验证。
+      <div class="form-row" style="margin-top:8px">
+        <button class="ghost-btn" id="lg-sms-send">获取短信验证码</button>
+      </div>
+      <div class="form-row">
+        <label>短信验证码</label>
+        <input type="text" id="lg-sms-code" inputmode="numeric" maxlength="8" placeholder="6 位验证码">
+      </div>
+      <div class="modal-actions" style="margin-bottom:0">
+        <button class="primary-btn" id="lg-sms-go">验证并登录</button>
+      </div>
+    </div>
     <div class="modal-actions">
       <button class="ghost-btn" id="lg-cancel">取消</button>
       <button class="primary-btn" id="lg-go">登录</button>
@@ -275,6 +292,35 @@ function openLoginModal(prefill = {}) {
         if (r2.ok) { toast(`✓ 登录成功，${r2.data.devices} 台设备`, "good"); closeModal(); await loadAll(true); }
         else { $("#lg-confirmed").disabled = false; $("#lg-confirmed").textContent = "我已确认，重试"; toast(r2.error || "仍未确认", "bad", 4000); }
       };
+    } else if (r.need_sms) {
+      // ---- 短信验证码 2FA ----
+      $("#lg-confirm-box").classList.add("hidden");
+      $("#lg-sms-box").classList.remove("hidden");
+      $("#lg-sms-send").onclick = async () => {
+        const b = $("#lg-sms-send");
+        b.disabled = true; b.textContent = "发送中…";
+        const rs = await api("POST", "/api/auth/sms/send", {});
+        b.disabled = false; b.textContent = "重新发送验证码";
+        if (rs.ok) toast("✓ 验证码已发送，请查收短信", "good", 3200);
+        else toast(rs.error || "发送失败", "bad", 4200);
+      };
+      $("#lg-sms-go").onclick = async () => {
+        const code = $("#lg-sms-code").value.trim();
+        if (!code) return toast("请输入短信验证码", "bad");
+        const b = $("#lg-sms-go");
+        b.disabled = true; b.textContent = "验证中…";
+        const rv = await api("POST", "/api/auth/sms/verify", { ticket: code });
+        if (rv.ok) {
+          toast(`✓ 登录成功，${rv.data.devices} 台设备`, "good", 3200);
+          closeModal(); await loadAll(true);
+        } else {
+          b.disabled = false; b.textContent = "验证并登录";
+          toast(rv.error || "验证失败", "bad", 4200);
+        }
+      };
+      $("#lg-sms-code").focus();
+      $("#lg-sms-code").onkeydown = (e) => { if (e.key === "Enter") $("#lg-sms-go").click(); };
+      toast(r.error || "小米要求短信验证", "", 3200);
     } else {
       toast(r.error || "登录失败", "bad", 4200);
     }
@@ -634,6 +680,100 @@ $("#btn-edit").onclick = () => {
   render();
 };
 $("#btn-devices").onclick = () => openDevicesModal();
+$("#btn-settings").onclick = () => openSettingsModal();
+
+/* ---------------- 面板密码登录框 ---------------- */
+function openPanelLoginModal() {
+  openModal(`
+    <h3>面板访问验证</h3>
+    <p class="m-sub">当前通过局域网直连访问，需要输入面板密码。
+       从 fnOS 桌面打开（统一网关）则无需此验证。</p>
+    <div class="form-row">
+      <label>面板密码</label>
+      <input type="password" id="pl-pass" autocomplete="off">
+    </div>
+    <div class="modal-actions">
+      <button class="ghost-btn" id="pl-cancel">取消</button>
+      <button class="primary-btn" id="pl-go">解锁</button>
+    </div>`);
+  $("#pl-pass").focus();
+  const go = async () => {
+    const password = $("#pl-pass").value;
+    if (!password) return toast("请输入面板密码", "bad");
+    const r = await api("POST", "/api/panel/login", { password });
+    if (r.ok) { toast("✓ 已解锁", "good"); location.reload(); }
+    else toast(r.error || "密码不正确", "bad", 3600);
+  };
+  $("#pl-go").onclick = go;
+  $("#pl-pass").onkeydown = (e) => { if (e.key === "Enter") go(); };
+}
+
+/* ---------------- 面板设置弹窗 ---------------- */
+async function openSettingsModal() {
+  const cfg = await api("GET", "/api/panel/config");
+  const c = cfg.data || {};
+  const pwSet = !!c.password_set;
+  openModal(`
+    <h3>面板设置</h3>
+    <p class="m-sub">从 fnOS 桌面打开（统一网关 /app/mihome-admin）时，
+       访问跟随 fnOS 登录状态，无需面板密码。</p>
+    <h4 class="set-h">局域网监听（${esc(String(c.port || ""))} 端口直连）</h4>
+    <div class="form-row switch-line">
+      <label class="switch"><input type="checkbox" id="st-listen" ${c.listen_enabled ? "checked" : ""}><span class="slider"></span></label>
+      <span>允许局域网设备直连访问</span>
+    </div>
+    <div class="form-row">
+      <label>绑定地址</label>
+      <input type="text" id="st-addr" value="${esc(c.listen_addr || "0.0.0.0")}"
+             placeholder="0.0.0.0 全部网卡 / 127.0.0.1 仅本机">
+      <span class="hint">0.0.0.0=局域网可访问；127.0.0.1=仅本机</span>
+    </div>
+    <h4 class="set-h">面板密码（保护局域网直连）</h4>
+    ${pwSet ? `
+    <div class="form-row">
+      <label>旧密码</label>
+      <input type="password" id="st-old" autocomplete="off">
+    </div>` : ""}
+    <div class="form-row">
+      <label>${pwSet ? "新密码" : "设置密码（至少 4 位）"}</label>
+      <input type="password" id="st-new" autocomplete="off">
+    </div>
+    ${pwSet ? `
+    <div class="form-row">
+      <button class="danger-btn" id="st-clear">清除密码（恢复免验证）</button>
+    </div>` : ""}
+    <div class="modal-actions">
+      <button class="ghost-btn" id="st-cancel">关闭</button>
+      <button class="primary-btn" id="st-save">保存</button>
+    </div>`);
+  $("#st-cancel").onclick = closeModal;
+  $("#st-save").onclick = async () => {
+    // 1) 监听配置
+    const lr = await api("POST", "/api/panel/listen", {
+      enabled: $("#st-listen").checked,
+      addr: $("#st-addr").value.trim() || "0.0.0.0",
+    });
+    if (!lr.ok) return toast(lr.error || "监听设置失败", "bad", 3600);
+    // 2) 密码（填了才改）
+    const nw = $("#st-new").value;
+    const oldV = pwSet ? ($("#st-old")?.value || "") : "";
+    if (nw) {
+      if (nw.length < 4) return toast("新密码至少 4 位", "bad");
+      const pr = await api("POST", "/api/panel/password", { old: oldV, new: nw });
+      if (!pr.ok) return toast(pr.error || "密码设置失败", "bad", 3600);
+      toast("✓ 密码已更新", "good");
+    }
+    toast("✓ 设置已保存", "good", 2000);
+    closeModal();
+  };
+  const clearBtn = $("#st-clear");
+  if (clearBtn) clearBtn.onclick = async () => {
+    const oldV = $("#st-old")?.value || "";
+    const r = await api("POST", "/api/panel/password/clear", { old: oldV });
+    if (r.ok) { toast("✓ 密码已清除", "good"); closeModal(); }
+    else toast(r.error || "清除失败", "bad", 3600);
+  };
+}
 
 /* ---------------- 启动 ---------------- */
 loadAll(true);

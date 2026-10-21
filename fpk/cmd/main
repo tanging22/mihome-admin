@@ -1,20 +1,23 @@
 #!/bin/bash
 # 米家设备管家 —— 启停脚本（fnOS 套件框架调用）
+# 服务形态：gunicorn 监听 unix socket（统一网关 /app/mihome-admin → target/app.sock）
+#          TCP 28100 由应用内线程按用户配置开关（设置页可关，默认开）
 set -u
 
 PKG_VAR_DIR="${TRIM_PKGVAR:-/var/apps/mihome-admin/var}"
 APP_HOME="${TRIM_APPDEST:-/var/apps/mihome-admin/target}"
 LOG_FILE="${PKG_VAR_DIR}/info.log"
 PID_FILE="${PKG_VAR_DIR}/app.pid"
+SOCK_FILE="${APP_HOME}/app.sock"
 
 PYTHON_BIN="${MIA_PYTHON:-/usr/bin/python3}"
-ENTRY="${APP_HOME}/server/app.py"
-VENDOR="${APP_HOME}/server/vendor"
+SERVER_DIR="${APP_HOME}/server"
+VENDOR="${SERVER_DIR}/vendor"
 
 # 端口：安装向导注入的 wizard_web_port > MIA_PORT > 默认 28100
 PORT="${wizard_web_port:-${MIA_PORT:-28100}}"
 case "${PORT}" in
-  ''|*[!0-9]*|0|[1-9]) PORT=28100 ;;  # 非法值兜底（1-9 开头的单位数也拒绝）
+  ''|*[!0-9]*|0|[1-9]) PORT=28100 ;;  # 非法值兜底
 esac
 
 log_msg() { echo "$(date '+%Y-%m-%d %H:%M:%S') [mihome] $*" >> "${LOG_FILE}" 2>/dev/null || true; }
@@ -25,13 +28,13 @@ is_running() {
   [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null
 }
 
-wait_port() {
-  local port="$1" tries="${2:-30}"
-  for _ in $(seq 1 "${tries}"); do
-    if command -v curl >/dev/null 2>&1; then
-      curl -s -o /dev/null --max-time 1 "http://127.0.0.1:${port}/api/status" && return 0
-    else
-      (exec 3<>"/dev/tcp/127.0.0.1/${port}") 2>/dev/null && { exec 3>&-; return 0; }
+wait_sock() {
+  # 等 unix socket 就绪并可用（最多 30s）
+  local tries="${1:-30}" i
+  for i in $(seq 1 "${tries}"); do
+    if [ -S "${SOCK_FILE}" ] && command -v curl >/dev/null 2>&1; then
+      curl -s -o /dev/null --max-time 2 --unix-socket "${SOCK_FILE}" \
+        "http://localhost/api/status" && return 0
     fi
     sleep 1
   done
@@ -44,21 +47,28 @@ do_start() {
     log_msg "already running (pid $(cat "${PID_FILE}"))"
     exit 0
   fi
-  log_msg "starting on port ${PORT} ..."
-  # 清理陈旧 PID
-  rm -f "${PID_FILE}"
+  log_msg "starting (gunicorn, sock=${SOCK_FILE}, tcp_port=${PORT}) ..."
+  rm -f "${PID_FILE}" "${SOCK_FILE}"
   PYTHONPATH="${VENDOR}" \
   MIA_PORT="${PORT}" \
   MIA_DATA_DIR="${PKG_VAR_DIR}" \
-  nohup "${PYTHON_BIN}" "${ENTRY}" >> "${LOG_FILE}" 2>&1 &
+  nohup "${PYTHON_BIN}" -m gunicorn \
+    --chdir "${SERVER_DIR}" \
+    --workers 1 --threads 4 --timeout 120 \
+    --bind "unix:${SOCK_FILE}" \
+    --log-file "${LOG_FILE}" \
+    --pid "${PID_FILE}" \
+    app:app >> "${LOG_FILE}" 2>&1 &
   local pid=$!
-  echo "${pid}" > "${PID_FILE}"
-  if wait_port "${PORT}" 30; then
-    log_msg "started pid=${pid} port=${PORT}"
+  # gunicorn --pid 写 master pid；兜底记录
+  sleep 1
+  [ -s "${PID_FILE}" ] || echo "${pid}" > "${PID_FILE}"
+  if wait_sock 30; then
+    log_msg "started pid=$(cat "${PID_FILE}") sock=${SOCK_FILE} tcp_port=${PORT}(可开关)"
     exit 0
   fi
-  if kill -0 "${pid}" 2>/dev/null; then
-    log_msg "process alive but port ${PORT} not ready yet; keeping pid=${pid}"
+  if kill -0 "$(cat "${PID_FILE}" 2>/dev/null)" 2>/dev/null; then
+    log_msg "process alive but sock not ready yet; keeping"
     exit 0
   fi
   log_msg "failed to start, tail of log:"
@@ -69,7 +79,7 @@ do_start() {
 
 do_stop() {
   if ! is_running; then
-    rm -f "${PID_FILE}"
+    rm -f "${PID_FILE}" "${SOCK_FILE}"
     log_msg "not running"
     exit 0
   fi
@@ -84,7 +94,7 @@ do_stop() {
     kill -9 "${pid}" 2>/dev/null
     log_msg "force killed pid=${pid}"
   fi
-  rm -f "${PID_FILE}"
+  rm -f "${PID_FILE}" "${SOCK_FILE}"
   exit 0
 }
 

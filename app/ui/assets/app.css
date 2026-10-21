@@ -92,6 +92,9 @@ html,body{margin:0;background:var(--bg);color:var(--ink);
 .switch-row{display:flex;align-items:center;gap:10px;padding:9px 0;border-top:1px solid var(--line)}
 .switch-row label{flex:1;font-size:13.5px;color:var(--ink)}
 .switch-row .hint{display:block;font-size:11.5px;color:var(--sub);font-weight:400;margin-top:1px}
+.set-h{margin:16px 0 4px;font-size:13px;color:var(--ink);border-bottom:1px solid var(--line);padding-bottom:6px}
+.switch-line{display:flex;align-items:center;gap:10px}
+.form-row .hint{display:block;font-size:11.5px;color:var(--sub);margin-top:2px}
 .switch{position:relative;width:40px;height:23px;flex:0 0 auto}
 .switch input{opacity:0;width:0;height:0}
 .slider{position:absolute;inset:0;background:#d4d8de;border-radius:999px;cursor:pointer;transition:.15s}

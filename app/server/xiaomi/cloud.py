@@ -30,6 +30,15 @@ class LoginConfirmNeeded(Exception):
         self.raw = raw or {}
 
 
+class LoginSmsNeeded(Exception):
+    """小米要求短信/邮箱身份验证（2FA identity 流程）。"""
+
+    def __init__(self, options=None, raw=None):
+        super().__init__("login sms verify needed")
+        self.options = options or []
+        self.raw = raw or {}
+
+
 class MiCloudClient:
     """小米云登录与云端控制。线程不安全，外部加锁使用。"""
 
@@ -47,6 +56,7 @@ class MiCloudClient:
         tz = datetime.datetime.now().astimezone().strftime("%z")
         self.timezone = "GMT{}:{}".format(tz[:-2], tz[-2:])
         self.locale = "zh_CN"
+        self._pending_sign = None  # 2FA identity 流程的会话签名
 
     # ---------------------------------------------------------- 基础
     @property
@@ -129,13 +139,18 @@ class MiCloudClient:
             post["_sign"] = sign
         resp = self.session.post(url, data=post)
         data = json.loads(resp.text.replace("&&&START&&&", ""))
-        # --- 2FA: 米家 App 登录确认 / 短信验证 ---
+        # --- 2FA: 米家 App 登录确认 ---
         notif = data.get("notifUrl") or data.get("notificationUrl")
         if notif and data.get("result") != "ok":
             raise LoginConfirmNeeded(notif, data)
         if data.get("captcha"):
             raise MiCloudException("小米要求验证码（captcha）: %s" % data.get("captchaUrl", ""))
         if data.get("result") != "ok":
+            # 无 notifUrl 的 2FA（短信/邮箱验证）：探测 identity 流程
+            options = self._identity_probe(sign)
+            if options:
+                log.info("小米要求身份验证, options=%s", options)
+                raise LoginSmsNeeded(options, data)
             desc = data.get("desc") or json.dumps(data, ensure_ascii=False)[:200]
             raise MiCloudAccessDenied("登录被拒绝: %s" % desc)
         self.user_id = data["userId"]
@@ -154,6 +169,67 @@ class MiCloudClient:
         if service_token:
             self.service_token = service_token
         return resp
+
+    # ------------------------------------------------------ 2FA 短信验证
+    def _identity_probe(self, sign):
+        """探测小米 identity 2FA 方式（phone/email）。失败返回 []。"""
+        try:
+            url = "https://account.xiaomi.com/identity/list"
+            resp = self.session.get(url, params={
+                "sid": "xiaomiio", "_sign": sign, "_json": "true"})
+            data = json.loads(resp.text.replace("&&&START&&&", ""))
+            self._pending_sign = data.get("_sign") or sign
+            return data.get("options") or []
+        except Exception as e:
+            log.warning("identity/list 探测失败: %s", e)
+            return []
+
+    def sms_send(self):
+        """触发短信验证码下发。"""
+        if not self._pending_sign:
+            raise MiCloudException("没有待验证的登录会话，请先重新提交登录")
+        url = "https://account.xiaomi.com/identity/auth/verifyPhone"
+        resp = self.session.post(url, params={
+            "sid": "xiaomiio", "_sign": self._pending_sign, "sendFirst": "true"},
+            data={"sendFirst": "true"})
+        try:
+            data = json.loads(resp.text.replace("&&&START&&&", ""))
+        except Exception:
+            raise MiCloudException("发送验证码响应异常: %s" % resp.text[:200])
+        code = data.get("code")
+        if code not in (0, None, "0"):
+            raise MiCloudException("发送验证码失败(code=%s): %s" % (
+                code, data.get("desc") or json.dumps(data, ensure_ascii=False)[:150]))
+        log.info("短信验证码已下发")
+        return True
+
+    def sms_verify(self, ticket):
+        """提交短信验证码完成登录。"""
+        if not self._pending_sign:
+            raise MiCloudException("没有待验证的登录会话，请先重新提交登录")
+        url = "https://account.xiaomi.com/identity/auth/verifyPhone"
+        resp = self.session.post(url, params={
+            "sid": "xiaomiio", "_sign": self._pending_sign},
+            data={"ticket": str(ticket).strip()})
+        try:
+            data = json.loads(resp.text.replace("&&&START&&&", ""))
+        except Exception:
+            raise MiCloudException("验证码校验响应异常: %s" % resp.text[:200])
+        location = data.get("location")
+        if not location:
+            raise MiCloudException("验证码校验失败: %s" % json.dumps(data, ensure_ascii=False)[:200])
+        if data.get("userId"):
+            self.user_id = data["userId"]
+        self.ssecurity = data.get("ssecurity") or self.ssecurity
+        self.cuser_id = data.get("cUserId")
+        self.pass_token = data.get("passToken") or self.pass_token
+        resp3 = self._login_step3(location)
+        if resp3.status_code == 200 and self.service_token and self.ssecurity:
+            self.failed_logins = 0
+            self._pending_sign = None
+            log.info("短信验证登录成功 userId=%s", self.user_id)
+            return True
+        raise MiCloudException("短信验证后换取 token 失败: %s %s" % (resp3.status_code, resp3.reason))
 
     # ---------------------------------------------------------- 请求
     def request(self, url_part, params, method="POST"):

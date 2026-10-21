@@ -17,7 +17,7 @@ OUT_NAME="mihome-admin-${VERSION}-amd64.fpk"
 echo "==> [1/5] 安装 Python 依赖到 app/server/vendor"
 rm -rf "${APP_DIR}/server/vendor"
 "${PIP}" install -q --target "${APP_DIR}/server/vendor" \
-  flask pycryptodome requests
+  flask pycryptodome requests gunicorn
 # 清理缓存与无用脚本（保留 dist-info：werkzeug 运行时要用 importlib.metadata 查版本）
 find "${APP_DIR}/server/vendor" -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
 rm -rf "${APP_DIR}/server/vendor/bin" 2>/dev/null || true
