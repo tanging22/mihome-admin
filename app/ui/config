@@ -7,7 +7,7 @@
       "protocol": "",
       "gatewayPrefix": "/app/mihome-admin",
       "gatewaySocket": "app.sock",
-      "url": "/app/mihome-admin",
+      "url": "/app/mihome-admin/",
       "allUsers": true
     }
   }

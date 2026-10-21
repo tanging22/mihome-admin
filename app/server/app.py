@@ -35,6 +35,8 @@ class _PrefixMiddleware:
     """fnOS 统一网关转发保留 /app/mihome-admin 前缀 → 剥掉再进路由。
 
     TCP 直连（不带前缀）的请求原样通过，互不影响。
+    前缀根不带尾斜杠时 308 重定向到带斜杠版本：iframe URL 无尾斜杠时，
+    浏览器会把相对路径 assets/app.js 解析到 /app/assets/（丢失应用段）导致 404。
     """
 
     def __init__(self, wsgi, prefix):
@@ -44,9 +46,14 @@ class _PrefixMiddleware:
     def __call__(self, environ, start_response):
         path = environ.get("PATH_INFO", "")
         if path == self.prefix:
-            environ["PATH_INFO"] = "/"
-        elif path.startswith(self.prefix + "/"):
-            environ["PATH_INFO"] = path[len(self.prefix):]
+            start_response("308 Permanent Redirect", [
+                ("Location", self.prefix + "/"),
+                ("Content-Type", "text/plain; charset=utf-8"),
+                ("Content-Length", "0"),
+            ])
+            return [b""]
+        if path.startswith(self.prefix + "/"):
+            environ["PATH_INFO"] = path[len(self.prefix):] or "/"
         return self.wsgi(environ, start_response)
 
 
