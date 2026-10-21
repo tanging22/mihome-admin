@@ -585,7 +585,8 @@ def _refresh_devices_internal():
 def devices():
     refresh = request.args.get("refresh") == "1"
     if refresh:
-        if not _ensure_login():
+        # OAuth 官方登录或 serviceToken 密码登录任一有效即可
+        if not _oauth_ready() and not _ensure_login():
             return err("未登录或登录态失效", 401)
         devices = _refresh_devices_internal()
     else:
@@ -662,15 +663,16 @@ def actions_add():
     body = request.get_json(silent=True) or {}
     name = (body.get("name") or "").strip()
     atype = body.get("action_type")
-    if not name or atype not in ("miot_prop_set", "miot_action", "rpc", "miio_lan"):
+    if not name or atype not in ("miot_prop_set", "miot_action", "rpc", "miio_lan",
+                                 "prop_display"):
         return err("需要 name 与合法 action_type")
     aid = store.action_add(
         section_id=body.get("section_id"), name=name,
         device_did=body.get("device_did"), device_name=body.get("device_name"),
         device_model=body.get("device_model"), action_type=atype,
         params=body.get("params") or {},
-        confirm=bool(body.get("confirm")), require_password=bool(body.get("require_password")),
-        sort=int(body.get("sort") or 0))
+        confirm=bool(body.get("confirm")) if atype != "prop_display" else False,
+        require_password=False, sort=int(body.get("sort") or 0))
     return ok({"id": aid})
 
 
@@ -695,6 +697,10 @@ def _run_action(action, password=None):
     if atype == "miot_prop_set":
         r = _cloud_call("miot_prop_set", did, params["siid"], params["piid"],
                         params["value"])
+    elif atype == "prop_display":
+        r = _cloud_call("request_json", "/miotspec/prop-get",
+                        {"params": [{"did": did, "siid": params["siid"],
+                                     "piid": params["piid"]}]})
     elif atype == "miot_action":
         r = _cloud_call("miot_action", did, params["siid"], params["aiid"],
                         params.get("in"))
@@ -766,6 +772,21 @@ def cloud_rpc():
         return jsonify({"ok": True, "result": r})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 502
+
+
+@app.post("/api/props/read")
+def props_read():
+    """批量读 miot 属性（信息卡片刷新）。body: {items:[{did,siid,piid},...]}"""
+    body = request.get_json(silent=True) or {}
+    items = [i for i in (body.get("items") or [])
+             if i.get("did") and i.get("siid") is not None and i.get("piid") is not None]
+    if not items:
+        return ok({"values": []})
+    try:
+        resp = _cloud_call("request_json", "/miotspec/prop-get", {"params": items})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 502
+    return ok({"values": resp.get("result") if isinstance(resp, dict) else []})
 
 
 # ---------------------------------------------------------------- main

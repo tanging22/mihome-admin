@@ -12,6 +12,7 @@ const state = {
 const TYPE_LABEL = {
   miot_prop_set: "属性",
   miot_action: "动作",
+  prop_display: "信息",
   rpc: "RPC",
   miio_lan: "局域网",
 };
@@ -128,8 +129,8 @@ function columnEl(sec) {
   if (state.editing) {
     const add = document.createElement("button");
     add.className = "add-card";
-    add.textContent = "＋ 添加动作";
-    add.onclick = () => openActionEditor(null, sec.id);
+    add.textContent = "＋ 添加控件";
+    add.onclick = () => openAddWizard(sec.id);
     body.appendChild(add);
   }
   if (!acts.length && !state.editing) {
@@ -141,18 +142,46 @@ function columnEl(sec) {
 
 function actionCard(a) {
   const el = document.createElement("div");
-  el.className = "card";
   el.dataset.action = a.id;
+  const tools = state.editing ? `
+    <div class="c-tools">
+      <button class="icon-btn" data-op="del" title="删除">🗑</button>
+    </div>` : "";
+  // 信息控件：显示实时值（指示灯 / 功率 / 温湿度 / 电量……）
+  if (a.action_type === "prop_display") {
+    const isSwitch = a.params && a.params.toggle;
+    el.className = "card info-card" + (isSwitch ? " as-switch" : "");
+    el.innerHTML = `
+      ${tools}
+      <div class="c-name">${esc(a.name)}</div>
+      <div class="c-value" id="iv-${a.id}">…</div>
+      <div class="c-dev">${esc(a.device_name || a.device_model || "")}</div>`;
+    if (isSwitch) {
+      el.title = "点击切换开关";
+      el.addEventListener("click", (e) => {
+        if (e.target.closest(".c-tools")) return;
+        toggleInfoCard(a, el);
+      });
+    } else {
+      el.title = "点击刷新";
+      el.addEventListener("click", (e) => {
+        if (e.target.closest(".c-tools")) return;
+        refreshInfoCards([a.id]);
+      });
+    }
+    el.querySelector('[data-op="del"]')?.addEventListener("click", () => deleteAction(a));
+    queueInfoRefresh(a.id);
+    return el;
+  }
+  // 动作按钮卡片
+  el.className = "card";
   const badges = [];
   if (a.device_name) badges.push(`<span class="badge">${esc(a.device_name)}</span>`);
   badges.push(`<span class="badge type">${TYPE_LABEL[a.action_type] || a.action_type}</span>`);
   if (a.confirm) badges.push(`<span class="badge confirm">需确认</span>`);
-  if (a.require_password) badges.push(`<span class="badge pass">🔒 安全密码</span>`);
+  if (a.require_password) badges.push(`<span class="badge pass">安全密码</span>`);
   el.innerHTML = `
-    <div class="c-tools">
-      <button class="icon-btn" data-op="edit" title="编辑">✎</button>
-      <button class="icon-btn" data-op="del" title="删除">🗑</button>
-    </div>
+    ${tools}
     <div class="c-name">${esc(a.name)}</div>
     <div class="c-dev">${esc(a.device_model || "")}</div>
     <div class="c-badges">${badges.join("")}</div>`;
@@ -160,10 +189,81 @@ function actionCard(a) {
     if (e.target.closest(".c-tools")) return;
     triggerAction(a, el);
   });
-  el.querySelector('[data-op="edit"]')?.addEventListener("click", () => openActionEditor(a));
   el.querySelector('[data-op="del"]')?.addEventListener("click", () => deleteAction(a));
   return el;
 }
+
+/* ---------------- 信息控件取值 ---------------- */
+const _infoQueue = new Set();
+function queueInfoRefresh(id) { _infoQueue.add(id); }
+async function refreshInfoCards(onlyIds = null) {
+  const cards = state.actions.filter(
+    (a) => a.action_type === "prop_display" && (!onlyIds || onlyIds.includes(a.id)));
+  if (!cards.length || !state.status?.logged_in) return;
+  const items = cards.map((a) => ({
+    id: a.id, did: a.device_did, siid: a.params.siid, piid: a.params.piid }));
+  let vals;
+  try {
+    const r = await api("POST", "/api/props/read",
+                        { items: items.map(({ id, ...it }) => it) });
+    if (!r.ok) { markInfoFail(onlyIds || cards.map((c) => c.id)); return; }
+    vals = r.data.values || [];
+  } catch (e) { markInfoFail(onlyIds || cards.map((c) => c.id)); return; }
+  const byKey = {};
+  for (const v of vals) byKey[`${v.did}:${v.siid}:${v.piid}`] = v;
+  for (const a of cards) {
+    const v = byKey[`${a.device_did}:${a.params.siid}:${a.params.piid}`];
+    const el = $(`#iv-${a.id}`);
+    if (!el) continue;
+    el.classList.remove("bad");
+    if (!v || v.code !== 0) {
+      el.textContent = v && v.code !== 0 ? "读取失败" : "—";
+      el.classList.add("bad");
+      continue;
+    }
+    el.innerHTML = fmtPropValue(v.value, a.params) +
+      (a.params.unit ? `<span class="c-unit">${esc(a.params.unit)}</span>` : "");
+    el.dataset.raw = typeof v.value === "object" ? JSON.stringify(v.value) : String(v.value);
+  }
+}
+function markInfoFail(ids) {
+  for (const id of ids || []) {
+    const el = $(`#iv-${id}`);
+    if (el) { el.textContent = "—"; el.classList.add("bad"); }
+  }
+}
+function fmtPropValue(v, params) {
+  if (v === true || v === 1 || v === "1") return `<span class="v-on">开</span>`;
+  if (v === false || v === 0 || v === "0") return `<span class="v-off">关</span>`;
+  if (typeof v === "number") {
+    let t = (Math.round(v * 100) / 100).toString();
+    if (params && params.unit === "℃" && v > 100) t = (v / 100).toString();
+    return t;
+  }
+  if (typeof v === "string") return esc(v.slice(0, 20));
+  if (v && typeof v === "object") {
+    if (v.brightness !== undefined) return esc(String(v.brightness));
+    return esc(JSON.stringify(v).slice(0, 20));
+  }
+  return "—";
+}
+async function toggleInfoCard(a, el) {
+  const cur = el.querySelector(".c-value")?.dataset.raw;
+  const isOn = cur === "true" || cur === "1";
+  const nv = isOn ? false : true;
+  const val = el.querySelector(".c-value");
+  if (val) { val.innerHTML = `<span class="${nv ? "v-on" : "v-off"}">…</span>`; }
+  try {
+    const r = await api("POST", `/api/actions/${a.id}/run`, {});
+    if (!r.ok) { toast(r.error || "切换失败", "bad", 3600); refreshInfoCards([a.id]); return; }
+    if (val) {
+      val.innerHTML = `<span class="${nv ? "v-on" : "v-off"}">${nv ? "开" : "关"}</span>`;
+      val.dataset.raw = nv ? "true" : "false";
+    }
+    toast(`✓ ${a.name} 已${nv ? "打开" : "关闭"}`, "good", 1800);
+  } catch (e) { toast("切换异常", "bad"); refreshInfoCards([a.id]); }
+}
+setInterval(() => refreshInfoCards(), 30000);
 
 /* ---------------- 动作执行 ---------------- */
 function triggerAction(a, el) {
@@ -221,14 +321,14 @@ async function doRun(a, password, el) {
 }
 
 /* ---------------- 登录 ---------------- */
-function openLoginModal(prefill = {}) {
+function openLoginModal() {
   openModal(`
     <h3>登录小米账号</h3>
-    <p class="m-sub">账号仅保存在本机 NAS 数据库，用于获取设备列表与执行动作。</p>
-    <button class="primary-btn" id="lg-oauth" style="width:100%">使用小米官方登录（推荐）</button>
-    <p class="hint" style="text-align:center;margin:6px 0 0">跳转小米官方页面完成验证码 / 短信等安全验证，登录后把地址栏网址粘贴回来。</p>
+    <p class="m-sub">账号仅保存在本机 NAS，用于获取设备列表与执行动作。</p>
+    <button class="primary-btn" id="lg-oauth" style="width:100%">打开小米官方登录页</button>
+    <p class="hint" style="text-align:center;margin:6px 0 0">验证码 / 短信等安全验证都在小米官方页面完成。</p>
     <div id="lg-oauth-box" class="notice hidden">
-      <b>① 在官方页面完成登录</b>（验证码 / 短信等都在官方页操作）。<br>
+      <b>① 在官方页面完成登录</b>。<br>
       登录后浏览器会跳到一个<b>打不开的页面</b>，这是正常的。<br>
       <b>② 复制浏览器地址栏里的完整网址</b>，粘贴到下面：
       <div class="form-row" style="margin-top:8px">
@@ -238,77 +338,19 @@ function openLoginModal(prefill = {}) {
         <button class="primary-btn" id="lg-paste-go">完成登录</button>
       </div>
     </div>
-    <div class="set-h" id="lg-pw-toggle" style="cursor:pointer">▸ 使用账号密码登录</div>
-    <div id="lg-pw-area" class="hidden">
-    <div class="form-row">
-      <label>小米账号（手机号 / 邮箱）</label>
-      <input type="text" id="lg-user" value="${esc(prefill.username || "")}" autocomplete="off">
-    </div>
-    <div class="form-row">
-      <label>密码</label>
-      <input type="password" id="lg-pass" autocomplete="off">
-    </div>
-    <div class="form-grid2">
-      <div class="form-row">
-        <label>服务器</label>
-        <select id="lg-country">
-          <option value="cn">中国大陆</option>
-          <option value="de">德国</option>
-          <option value="us">美国</option>
-          <option value="ru">俄罗斯</option>
-          <option value="tw">台湾</option>
-          <option value="sg">新加坡</option>
-          <option value="in">印度</option>
-        </select>
-      </div>
-      <div class="form-row">
-        <label>&nbsp;</label>
-        <label class="switch-row" style="border:0;padding:6px 0">
-          <label class="switch"><input type="checkbox" id="lg-remember" checked><span class="slider"></span></label>
-          <label>记住密码<span class="hint">token 失效时自动重登</span></label>
-        </label>
-      </div>
-    </div>
-    <div id="lg-confirm-box" class="notice hidden">
-      小米要求登录确认。请打开米家 App，在「我的 → 消息」或弹窗里点「确认登录」，然后回来点下面的按钮。
-    </div>
-    <div id="lg-sms-box" class="notice hidden">
-      小米要求短信验证。
-      <div class="form-row" style="margin-top:8px">
-        <button class="ghost-btn" id="lg-sms-send">获取短信验证码</button>
-      </div>
-      <div class="form-row">
-        <label>短信验证码</label>
-        <input type="text" id="lg-sms-code" inputmode="numeric" maxlength="8" placeholder="6 位验证码">
-      </div>
-      <div class="modal-actions" style="margin-bottom:0">
-        <button class="primary-btn" id="lg-sms-go">验证并登录</button>
-      </div>
-    </div>
-    </div>
     <div class="modal-actions">
       <button class="ghost-btn" id="lg-cancel">取消</button>
-      <button class="primary-btn" id="lg-go">登录</button>
     </div>`);
-  $("#lg-country").value = prefill.country || "cn";
   $("#lg-cancel").onclick = closeModal;
-  // 密码登录区折叠/展开
-  $("#lg-pw-toggle").onclick = () => {
-    const area = $("#lg-pw-area");
-    const open = area.classList.toggle("hidden") === false;
-    $("#lg-pw-toggle").textContent = open ? "▾ 使用账号密码登录" : "▸ 使用账号密码登录";
-  };
-  // 官方 OAuth 登录
   $("#lg-oauth").onclick = async () => {
     const btn = $("#lg-oauth");
     btn.disabled = true; btn.textContent = "正在跳转小米官方页面…";
     const r = await api("POST", "/api/auth/oauth/start", {});
     if (!r.ok) {
-      btn.disabled = false; btn.textContent = "使用小米官方登录（推荐）";
+      btn.disabled = false; btn.textContent = "打开小米官方登录页";
       return toast(r.error || "发起官方登录失败", "bad", 4000);
     }
     window.open(r.data.url, "_blank");
-    // 显示粘贴回调地址区
     $("#lg-oauth-box").classList.remove("hidden");
     btn.textContent = "官方页面已打开";
     $("#lg-paste-go").onclick = async () => {
@@ -318,7 +360,7 @@ function openLoginModal(prefill = {}) {
       const er = await api("POST", "/api/auth/oauth/exchange", { callback_url: url });
       go.disabled = false; go.textContent = "完成登录";
       if (er.ok) {
-        toast(`✓ 小米官方登录成功${er.data.username ? "（" + er.data.username + "）" : ""}`, "good", 3600);
+        toast(`✓ 登录成功${er.data.username ? "（" + er.data.username + "）" : ""}，发现 ${er.data.devices} 台设备`, "good", 3600);
         closeModal();
         await loadAll(true);
       } else {
@@ -326,65 +368,7 @@ function openLoginModal(prefill = {}) {
       }
     };
   };
-  $("#lg-pass").focus();
-  const doLogin = async () => {
-    const username = $("#lg-user").value.trim();
-    const password = $("#lg-pass").value;
-    const country = $("#lg-country").value;
-    const remember_password = $("#lg-remember").checked;
-    if (!username || !password) return toast("请输入账号与密码", "bad");
-    const btn = $("#lg-go"); btn.disabled = true; btn.textContent = "登录中…";
-    const r = await api("POST", "/api/auth/login", { username, password, country, remember_password });
-    btn.disabled = false; btn.textContent = "登录";
-    if (r.ok) {
-      toast(`✓ 登录成功，发现 ${r.data.devices} 台设备`, "good", 3200);
-      closeModal(); await loadAll(true);
-    } else if (r.need_confirm) {
-      $("#lg-confirm-box").classList.remove("hidden");
-      $("#lg-confirm-box").innerHTML =
-        `小米要求登录确认。请打开米家 App 在通知里点「确认登录」，然后点这里：<br>
-         <button class="primary-btn" id="lg-confirmed" style="margin-top:8px">我已确认，重试</button>`;
-      $("#lg-confirmed").onclick = async () => {
-        $("#lg-confirmed").disabled = true; $("#lg-confirmed").textContent = "重试中…";
-        const r2 = await api("POST", "/api/auth/confirm", {});
-        if (r2.ok) { toast(`✓ 登录成功，${r2.data.devices} 台设备`, "good"); closeModal(); await loadAll(true); }
-        else { $("#lg-confirmed").disabled = false; $("#lg-confirmed").textContent = "我已确认，重试"; toast(r2.error || "仍未确认", "bad", 4000); }
-      };
-    } else if (r.need_sms) {
-      // ---- 短信验证码 2FA ----
-      $("#lg-confirm-box").classList.add("hidden");
-      $("#lg-sms-box").classList.remove("hidden");
-      $("#lg-sms-send").onclick = async () => {
-        const b = $("#lg-sms-send");
-        b.disabled = true; b.textContent = "发送中…";
-        const rs = await api("POST", "/api/auth/sms/send", {});
-        b.disabled = false; b.textContent = "重新发送验证码";
-        if (rs.ok) toast("✓ 验证码已发送，请查收短信", "good", 3200);
-        else toast(rs.error || "发送失败", "bad", 4200);
-      };
-      $("#lg-sms-go").onclick = async () => {
-        const code = $("#lg-sms-code").value.trim();
-        if (!code) return toast("请输入短信验证码", "bad");
-        const b = $("#lg-sms-go");
-        b.disabled = true; b.textContent = "验证中…";
-        const rv = await api("POST", "/api/auth/sms/verify", { ticket: code });
-        if (rv.ok) {
-          toast(`✓ 登录成功，${rv.data.devices} 台设备`, "good", 3200);
-          closeModal(); await loadAll(true);
-        } else {
-          b.disabled = false; b.textContent = "验证并登录";
-          toast(rv.error || "验证失败", "bad", 4200);
-        }
-      };
-      $("#lg-sms-code").focus();
-      $("#lg-sms-code").onkeydown = (e) => { if (e.key === "Enter") $("#lg-sms-go").click(); };
-      toast(r.error || "小米要求短信验证", "", 3200);
-    } else {
-      toast(r.error || "登录失败", "bad", 4200);
-    }
-  };
-  $("#lg-go").onclick = doLogin;
-  $("#lg-pass").onkeydown = (e) => { if (e.key === "Enter") doLogin(); };
+  $("#lg-paste-url").addEventListener("paste", () => setTimeout(() => $("#lg-paste-go")?.click(), 200));
 }
 
 /* ---------------- 栏目编辑 ---------------- */
@@ -719,7 +703,7 @@ function openMiioConsole(dev = null) {
 }
 
 /* ---------------- 顶部按钮 ---------------- */
-$("#btn-login").onclick = () => openLoginModal({ username: state.status?.username, country: state.status?.country });
+$("#btn-login").onclick = () => openLoginModal();
 $("#btn-logout").onclick = async () => {
   openModal(`
     <h3>退出登录？</h3>
