@@ -207,6 +207,12 @@ class HaClient:
                                "params": [{"did": did, "siid": siid, "piid": piid}]})
         return {"result": body.get("result")}
 
+    def batch_prop_get(self, items):
+        """批量读属性，items=[{did,siid,piid},...]。"""
+        body = self._api("/app/v2/miotspec/prop/get",
+                         data={"datasource": 1, "params": items})
+        return {"result": body.get("result")}
+
     def miot_prop_set(self, did, siid, piid, value):
         body = self._api("/app/v2/miotspec/prop/set",
                          data={"params": [{"did": did, "siid": siid,

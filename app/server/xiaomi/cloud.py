@@ -285,6 +285,10 @@ class MiCloudClient:
         params = {"params": [{"did": did, "siid": siid, "piid": piid}]}
         return self.request_json("/miotspec/prop-get", params)
 
+    def batch_prop_get(self, items):
+        """批量读属性，items=[{did,siid,piid},...]。"""
+        return self.request_json("/miotspec/prop-get", {"params": items})
+
     def miot_prop_set(self, did, siid, piid, value):
         params = {"params": [{"did": did, "siid": siid, "piid": piid, "value": value}]}
         return self.request_json("/miotspec/prop-set", params)

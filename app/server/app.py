@@ -618,7 +618,32 @@ def device_spec(model):
             return err("找不到 %s 的 spec" % model, 404)
         r = rq.get("https://miot-spec.org/miot-spec-v2/instance?type=%s" % urn,
                    timeout=10)
-        return ok({"urn": urn, "spec": r.json()})
+        # 官方多语言：tag 'service:002:property:001' -> p:2:1
+        i18n = {}
+        try:
+            tr = rq.get("https://miot-spec.org/instance/v2/multiLanguage",
+                        params={"urn": urn}, timeout=10)
+            zh = (tr.json().get("data") or {}).get("zh_cn") or {}
+            for tag, val in zh.items():
+                if not val or not str(val).strip():
+                    continue
+                parts = str(tag).split(":")
+                try:
+                    if len(parts) == 2:
+                        i18n["s:%d" % int(parts[1])] = val
+                    elif len(parts) == 4:
+                        key = "p" if parts[2] == "property" else (
+                            "a" if parts[2] == "action" else "e")
+                        i18n["%s:%d:%d" % (key, int(parts[1]),
+                                           int(parts[3]))] = val
+                    elif len(parts) == 6:
+                        i18n["v:%d:%d:%d" % (int(parts[1]), int(parts[3]),
+                                             int(parts[5]))] = val
+                except ValueError:
+                    continue
+        except Exception as e:
+            log.info("multiLanguage 拉取失败（不影响 spec）: %s", e)
+        return ok({"urn": urn, "spec": r.json(), "i18n": i18n})
     except Exception as e:
         return err("拉取 spec 失败：%s" % e, 502)
 
@@ -783,7 +808,7 @@ def props_read():
     if not items:
         return ok({"values": []})
     try:
-        resp = _cloud_call("request_json", "/miotspec/prop-get", {"params": items})
+        resp = _cloud_call("batch_prop_get", items)
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 502
     return ok({"values": resp.get("result") if isinstance(resp, dict) else []})

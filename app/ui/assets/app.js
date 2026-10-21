@@ -313,19 +313,20 @@ async function openAddWizard(sectionId) {
       "fan-level":"风量", status:"状态", fault:"故障", "motor-control":"电机",
       "target-temperature":"目标温度", "target-humidity":"目标湿度",
       "alarm-switch":"告警开关", "physical-controls-locked":"童锁"};
-    const label = (desc) => (desc && CN[desc.toLowerCase()]) || desc;
+    const i18n = sp.data.i18n || {};
+    const label = (desc, key) => i18n[key] || (desc && CN[desc.toLowerCase()]) || desc;
     for (const sv of services) {
       for (const pr of sv.properties || []) {
         const acc = pr.access || [];
         if (!acc.includes("read")) continue;
         const writable = acc.includes("write");
         const isBool = pr.format === "bool";
-        props.push({ siid: sv.iid, piid: pr.iid, desc: label(pr.description) || ("属性" + pr.iid),
+        props.push({ siid: sv.iid, piid: pr.iid, desc: label(pr.description, "p:" + sv.iid + ":" + pr.iid) || ("属性" + pr.iid),
                      unit: pr.unit || "", writable, isBool });
       }
       for (const ac of sv.actions || []) {
         if ((ac.in || []).length) continue;      // 带参数的动作走高级模式
-        acts.push({ siid: sv.iid, aiid: ac.iid, desc: label(ac.description) || ("动作" + ac.iid) });
+        acts.push({ siid: sv.iid, aiid: ac.iid, desc: label(ac.description, "a:" + sv.iid + ":" + ac.iid) || ("动作" + ac.iid) });
       }
     }
     if (!props.length && !acts.length) {
