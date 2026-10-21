@@ -34,7 +34,14 @@ OAUTH2_API_HOST = "ha.api.io.mi.com"
 # 自定义域名返回 96010 invalid redirect uri）。用户在官方页登录后，
 # 浏览器会跳到该地址（打不开没关系），把地址栏 URL 粘贴回面板换 token。
 HA_REDIRECT_URL = "http://homeassistant.local:8123"
-UA = ("Android-7.1.1-1.0.0-ONEPLUS A3010-136-%s APP/xiaomi.smarthome APPV/62830")
+# UA 对齐官方 HA 集成（ha_xiaomi_home/{ver} {system_info} client/{device_id}）
+INTEGRATION_VERSION = "v2.0.5"
+SYSTEM_INFO = "HA-CORE/2025.1.4 Python/3.13 Linux/x86_64"
+
+
+def ua_for(device_id):
+    return ("ha_xiaomi_home/%s %s client/%s"
+            % (INTEGRATION_VERSION, SYSTEM_INFO, device_id))
 
 
 class OAuthError(Exception):
@@ -46,7 +53,15 @@ class OAuthTokenExpired(OAuthError):
 
 
 def new_device_id():
-    return "mia." + secrets.token_hex(8)
+    """官方格式 ha.{uuid4}（MIoTOauthClient: self._device_id = f'ha.{uuid}'）。"""
+    import uuid as _u
+    return "ha." + str(_u.uuid4())
+
+
+def make_state(device_id):
+    """官方 state 规则：SHA1('d=' + device_id)（miot_cloud.py:111-112）。"""
+    import hashlib as _h
+    return _h.sha1(("d=" + device_id).encode("utf-8")).hexdigest()
 
 
 def login_url(redirect_uri, state, device_id=None):
@@ -57,7 +72,7 @@ def login_url(redirect_uri, state, device_id=None):
         "response_type": "code",
         "device_id": device_id,
         "state": state,
-        "skip_confirm": "false",
+        "skip_confirm": False,     # 官方默认 False（urlencode 输出 False）
     })
     return "%s?%s" % (OAUTH2_AUTH_URL, q)
 
@@ -75,7 +90,7 @@ def token_by_code(code, redirect_uri, device_id=None, country="cn"):
             "device_id": device_id,
         }, separators=(",", ":"))},
         headers={"Content-Type": "application/x-www-form-urlencoded",
-                 "User-Agent": UA % OAUTH2_CLIENT_ID},
+                 "User-Agent": ua_for(device_id)},
         timeout=20)
     if r.status_code != 200:
         raise OAuthError("get_token 返回 HTTP %s: %s" % (r.status_code, r.text[:200]))
@@ -111,7 +126,7 @@ class HaClient:
             "X-Client-AppId": OAUTH2_CLIENT_ID,
             "Content-Type": "application/json",
             "Authorization": "Bearer%s" % self.access_token,   # Bearer 后无空格
-            "User-Agent": UA % OAUTH2_CLIENT_ID,
+            "User-Agent": ua_for(self.device_id),
         }
 
     def _api(self, url_path, data=None, params=None):
@@ -141,7 +156,7 @@ class HaClient:
             "https://open.account.xiaomi.com/user/profile",
             params={"clientId": OAUTH2_CLIENT_ID, "token": self.access_token},
             headers={"Content-Type": "application/x-www-form-urlencoded",
-                     "User-Agent": UA % OAUTH2_CLIENT_ID},
+                     "User-Agent": ua_for(device_id)},
             timeout=15)
         try:
             body = r.json()

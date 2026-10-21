@@ -366,9 +366,10 @@ def oauth_start():
     now = _t.time()
     for k in [k for k, v in _pending_oauth.items() if now - v.get("ts", 0) > _OAUTH_STATE_TTL]:
         _pending_oauth.pop(k, None)
-    state = secrets.token_hex(16)
-    # 授权页与换 token 必须用同一个 device_id，否则小米报 invalid authorization code
+    # 授权页与换 token 必须用同一个 device_id，否则小米报 invalid authorization code；
+    # state 用官方规则 SHA1('d='+device_id)
     device_id = oauth.new_device_id()
+    state = oauth.make_state(device_id)
     _pending_oauth[state] = {"redirect": oauth.HA_REDIRECT_URL, "ts": now,
                              "device_id": device_id}
     return ok({"url": oauth.login_url(oauth.HA_REDIRECT_URL, state,
