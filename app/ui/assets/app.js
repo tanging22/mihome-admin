@@ -17,10 +17,18 @@ const TYPE_LABEL = {
 };
 const $ = (sel) => document.querySelector(sel);
 
+// fnOS 统一网关场景下 API 必须带 /app/mihome-admin 前缀：
+// 页面 URL 是 /app/mihome-admin/，相对 fetch("/api/..") 会被网关
+// 路由到 fnOS 自身的 API（如 /api/auth/login 是 NAS 登录）。
+// TCP 直连（pathname=/）时前缀为空，行为不变。
+const _MIA_BASE = location.pathname.startsWith("/app/")
+  ? location.pathname.replace(/\/+$/, "")
+  : "";
+
 async function api(method, path, body) {
   const opt = { method, headers: { "Content-Type": "application/json" } };
   if (body !== undefined) opt.body = JSON.stringify(body);
-  const r = await fetch(path, opt);
+  const r = await fetch(_MIA_BASE + path, opt);
   let d = {};
   try { d = await r.json(); } catch (e) { d = { ok: false, error: "HTTP " + r.status }; }
   // TCP 直连遇到面板密码拦截 → 弹面板登录框（登录成功自动刷新）
